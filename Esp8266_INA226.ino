@@ -4,10 +4,12 @@
 #include <ESP8266httpUpdate.h>
 #include <Credentials\Credentials.h>
 
+
 //---------------- INA226------------------
 #include <Wire.h>
 #include <INA226.h>
-//-----------------------------------------
+//---------------Deep sleep settings to SPIFFS-----------------------
+#include "FS.h"
 
 
 const char* mqtt_server = SERVER_IP;
@@ -20,14 +22,9 @@ PubSubClient client(espClient);
 long lastTempMsg = 0;
 char msg[50];
 
-int sensorRequestPeriod = 20000; // 20 seconds
+int sensorRequestPeriod = 10000; // 20 seconds
 
 const int RELAY_PIN = 0; //GPIO 0 or D3
-//const int RELAY_PIN = 16;
-//const int RELAY_PIN = 16;
-//const int RELAY_PIN = 16;
-
-
 
 //---------------- INA226------------------
 INA226 ina;
@@ -36,7 +33,11 @@ float busPower = 0.0;
 float shuntVoltage = 0.0;
 float shuntCurrent = 0.0;
 
-//-----------------------------------------
+//---------------Deep Sleep--------------------------
+bool useDeepSleep = false;
+int sleepPeriod = 60; // Seconds
+
+
 
 /* Over The Air automatic firmware update from a web server.  ESP8266 will contact the
 *  server on every boot and check for a firmware update.  If available, the update will
@@ -51,16 +52,22 @@ float shuntCurrent = 0.0;
 
 void setup()
 {
+	Serial.begin(115200);
+	// always use this to "mount" the filesystem
+	bool result = SPIFFS.begin();
+	Serial.println("SPIFFS started: " + result);
 	pinMode(RELAY_PIN, OUTPUT);
 	digitalWrite(RELAY_PIN, HIGH);
-	Serial.begin(115200);
 	WiFi.mode(WIFI_STA);
 	client.setServer(mqtt_server, 1883);
 	client.setCallback(callback);
 	setup_wifi();
-	//HTTP_OTA();
+	HTTP_OTA();
 	initializeINA226();
+	sendMessageToMqttOnce();
 }
+
+
 
 void setup_wifi() {
 
@@ -184,41 +191,51 @@ void loop()
 		reconnectToBroker();
 	}
 	client.loop();
-	sendMessageToMqtt();
-	//Serial.print("Go to deep sleep");
-	//ESP.deepSleep(60e6); // 20e6 is 20 microseconds
+	sendMessageToMqttInLoop();
 }
 
-void sendMessageToMqtt() {
+void sendMessageToMqttInLoop() {
 	long now = millis();
 	if (now - lastTempMsg > sensorRequestPeriod) {
 		lastTempMsg = now;
 		getSensorData();
-
-		Serial.print("Publish message busVoltage: ");
-		Serial.println(busVoltage, 5);
-		if (0 < busVoltage && busVoltage < 20) // do not send failed read data
-		{
-			client.publish("Battery/busVoltage", String(busVoltage, 5).c_str());
-		}
-
-		Serial.print("Publish message busPower: ");
-		Serial.println(busPower, 5);
-		if (0 < busPower && busPower < 100) // do not send failed read data
-		{
-			client.publish("Battery/busPower", String(busPower, 5).c_str());
-		}
-
-		Serial.print("Publish message shuntCurrent: ");
-		Serial.println(shuntCurrent, 5);
-		client.publish("Battery/shuntCurrent", String(shuntCurrent, 5).c_str());
-
-		Serial.print("Publish message shuntVoltage: ");
-		Serial.println(shuntVoltage, 5);
-		client.publish("Battery/shuntVoltage", String(shuntVoltage, 5).c_str());
-
+		sendMessageToMqtt();
 	}
 }
+
+void sendMessageToMqttOnce() {
+	if (useDeepSleep) {
+		getSensorData();
+		sendMessageToMqtt();
+		sleep(sleepPeriod);
+	}
+}
+
+void sendMessageToMqtt() {
+
+	Serial.print("Publish message busVoltage: ");
+	Serial.println(busVoltage, 5);
+	client.publish("Battery/busVoltage", String(busVoltage, 5).c_str());
+
+	Serial.print("Publish message busPower: ");
+	Serial.println(busPower, 5);
+	client.publish("Battery/busPower", String(busPower, 5).c_str());
+
+	Serial.print("Publish message shuntCurrent: ");
+	Serial.println(shuntCurrent, 5);
+	client.publish("Battery/shuntCurrent", String(shuntCurrent, 5).c_str());
+
+	Serial.print("Publish message shuntVoltage: ");
+	Serial.println(shuntVoltage, 5);
+	client.publish("Battery/shuntVoltage", String(shuntVoltage, 5).c_str());
+}
+
+
+void sleep(int sleepTimeInSeconds) {
+	Serial.print("Go to deep sleep");
+	ESP.deepSleep(sleepTimeInSeconds * 1000000);
+}
+
 void initializeINA226() {
 	//Serial.println("Initialize INA226");
 	//Serial.println("-----------------------------------------------");
@@ -332,3 +349,34 @@ void getSensorData() {
 	Serial.println("");
 }
 
+int getSleepPeriodFromFile() {
+	int slPeriod = -1;
+	File sp = SPIFFS.open("/sp.txt", "r");
+	if (sp) {
+		String str = sp.readStringUntil('n');
+		slPeriod = str.toInt();
+		Serial.println("sp.txt read result: " + slPeriod);
+		sp.close();
+		return slPeriod;
+	}
+	Serial.println("sp.txt read failed!");
+	return slPeriod;
+}
+
+void saveSleepPeriodToFile(int slPer) {
+	if (getSleepPeriodFromFile() != slPer)
+	{
+		if (SPIFFS.remove("/sp.txt")) {
+			Serial.println("Old file succesfully deleted");
+		}
+		else {
+			Serial.println("Couldn't delete file");
+		}
+		File sp = SPIFFS.open("/sp.txt", "w");
+		if (!sp) {
+			Serial.println("file creation failed");
+		}
+		sp.println(slPer);
+		sp.close();
+	}	
+}
